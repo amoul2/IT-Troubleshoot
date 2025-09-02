@@ -1,2 +1,0 @@
-# IT-Troubleshoot
-KB-Troubleshoot

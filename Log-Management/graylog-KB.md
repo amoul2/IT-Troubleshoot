@@ -1,5 +1,6 @@
 
 # วิธี install Graylog บน ubuntu for Docker
+![image](https://github.com/user-attachments/assets/e411fb28-40f3-422a-ac02-b43b12130deb)
 
 Graylog แนะนำ **พื้นที่เก็บข้อมูลขั้นต่ำ** ตามนี้
 
@@ -20,6 +21,8 @@ Graylog แนะนำ **พื้นที่เก็บข้อมูลข
 * MongoDB ใช้พื้นที่เล็กน้อย (2-5GB)
 * OpenSearch ใช้พื้นที่หลักในการเก็บ log
 * พื้นที่ที่ต้องใช้จริงขึ้นอยู่กับจำนวน log ที่รับเข้าและระยะเวลาที่ต้องการเก็บ
+  
+![image](https://github.com/user-attachments/assets/63b1e2e6-bc5c-4b96-bf0b-31f3d43298d1)
 
 ℹ️ **Graylog มีระบบหมุนเวียน log (Retention Policy)** เพื่อลบ log เก่าอัตโนมัติ ช่วยลดการใช้พื้นที่จัดเก็บ.
 
@@ -58,40 +61,105 @@ nano docker-compose.yml
 
 ```
 version: '3'
-
 services:
-  mongo:
-    image: mongo:4.2
-    networks:
-      - graylog
-
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:7.10.2
-    environment:
-      - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m
-    networks:
-      - graylog
-
-  graylog:
-    image: graylog/graylog:4.2
-    environment:
-      - GRAYLOG_PASSWORD_SECRET=verylongandsecurepassword
-      - GRAYLOG_ROOT_PASSWORD_SHA2=8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
-      - GRAYLOG_HTTP_EXTERNAL_URI=http://192.168.200.253:9000/
-    entrypoint: /usr/bin/tini -- wait-for-it elasticsearch:9200 -- /docker-entrypoint.sh
-    depends_on:
-      - mongo
-      - elasticsearch
-    networks:
-      - graylog
+  # MongoDB: https://hub.docker.com/_/mongo/
+  mongodb:
+    image: "mongo:6.0.18"
     ports:
-      - "9000:9000"
+      - "27017:27017"
+    restart: "on-failure"
+    networks:
+      - graylog
+    volumes:
+      - "mongodb_data:/data/db"
+      - "mongodb_config:/data/configdb"
+
+  opensearch:
+    image: "opensearchproject/opensearch:2.15.0"
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+      - "bootstrap.memory_lock=true"
+      - "discovery.type=single-node"
+      - "action.auto_create_index=false"
+      - "plugins.security.ssl.http.enabled=false"
+      - "plugins.security.disabled=true"
+      # Can generate a password for `OPENSEARCH_INITIAL_ADMIN_PASSWORD` using a linux device via:
+      # tr -dc A-Z-a-z-0-9_@#%^-_=+ < /dev/urandom | head -c${1:-32}
+      - "OPENSEARCH_INITIAL_ADMIN_PASSWORD=+_8r#wliY3Pv5-HMIf4qzXImYzZf-M=M"
+    ulimits:
+      memlock:
+        hard: -1
+        soft: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9203:9200"
+      - "9303:9300"
+    restart: "on-failure"
+    networks:
+      - graylog
+    volumes:
+      - "opensearch:/usr/share/opensearch/data"
+
+  # Graylog: https://hub.docker.com/r/graylog/graylog/
+  graylog:
+    hostname: "server"
+    image: "graylog/graylog:6.2.2"
+    # To install Graylog Open: "graylog/graylog:6.1"
+    depends_on:
+      mongodb:
+        condition: "service_started"
+      opensearch:
+        condition: "service_started"
+    entrypoint: "/usr/bin/tini -- wait-for-it opensearch:9200 -- /docker-entrypoint.sh"
+    environment:
+      GRAYLOG_NODE_ID_FILE: "/usr/share/graylog/data/config/node-id"
+      GRAYLOG_HTTP_BIND_ADDRESS: "0.0.0.0:9000"
+      GRAYLOG_ELASTICSEARCH_HOSTS: "http://opensearch:9200"
+      GRAYLOG_MONGODB_URI: "mongodb://mongodb:27017/graylog"
+      # To make reporting (headless_shell) work inside a Docker container
+      GRAYLOG_REPORT_DISABLE_SANDBOX: "true"
+      # CHANGE ME (must be at least 16 characters)!
+      GRAYLOG_PASSWORD_SECRET: "somepasswordpepper"
+      # Password: "admin"
+      GRAYLOG_ROOT_PASSWORD_SHA2: "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+      GRAYLOG_HTTP_EXTERNAL_URI: "http://127.0.0.1:9000/"
+    ports:
+      # Graylog web interface and REST API
+      - "9000:9000/tcp"
+      # Beats
+      - "5044:5044/tcp"
+      # Syslog TCP
+      - "5140:5140/tcp"
+      # Syslog UDP
+      - "5140:5140/udp"
+      # GELF TCP
+      - "12201:12201/tcp"
+      # GELF UDP
       - "12201:12201/udp"
-      - "514:514/udp" #syslog
+      # Forwarder data
+      - "13301:13301/tcp"
+      # Forwarder config
+      - "13302:13302/tcp"
+      # UDP-514
+      - "514:514/udp"
+    restart: "on-failure"
+    networks:
+      - graylog
+    volumes:
+      - "graylog_data:/usr/share/graylog/data"
 
 networks:
   graylog:
+    driver: "bridge"
+
+volumes:
+  mongodb_data:
+  mongodb_config:
+  opensearch:
+  graylog_data:
+
 ```
 
 > **หมายเหตุ**  
@@ -139,6 +207,9 @@ sudo docker-compose up -d
 ```
 sudo netstat -tuln | grep 9000
 ```
+
+อ้างอิงการ Config
+https://www.virtualizationhowto.com/2023/09/graylog-docker-compose-setup-an-open-source-syslog-server-for-home-labs/
 
 ##### ตรวจสอบว่า Graylog ได้ รับ Log แล้วหรือไม่
 
